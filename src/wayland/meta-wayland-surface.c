@@ -715,6 +715,7 @@ static void
 meta_wayland_surface_apply_state (MetaWaylandSurface      *surface,
                                   MetaWaylandSurfaceState *state)
 {
+  
   MetaWaylandSurface *subsurface_surface;
   gboolean had_damage = FALSE;
 

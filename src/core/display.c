@@ -250,6 +250,7 @@ meta_display_set_property(GObject         *object,
 static void
 meta_display_class_init (MetaDisplayClass *klass)
 {
+  fprintf(stderr,"[PRAMOD_DEBUG]: [%s : %d] \n",__func__,__LINE__);
   GObjectClass *object_class = G_OBJECT_CLASS (klass);
 
   object_class->get_property = meta_display_get_property;

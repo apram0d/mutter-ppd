@@ -707,6 +707,7 @@ meta_stage_impl_scanout_view (MetaStageImpl     *stage_impl,
   return TRUE;
 }
 
+
 static void
 meta_stage_impl_redraw_view (ClutterStageWindow *stage_window,
                              ClutterStageView   *stage_view,

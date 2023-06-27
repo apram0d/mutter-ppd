@@ -812,7 +812,6 @@ meta_wayland_xdg_toplevel_apply_state (MetaWaylandSurfaceRole  *surface_role,
       return;
     }
 }
-
 static void
 meta_wayland_xdg_toplevel_post_apply_state (MetaWaylandSurfaceRole  *surface_role,
                                             MetaWaylandSurfaceState *pending)
@@ -832,6 +831,22 @@ meta_wayland_xdg_toplevel_post_apply_state (MetaWaylandSurfaceRole  *surface_rol
   window = meta_wayland_surface_get_window (surface);
   if (!window)
     return;
+
+  // fprintf(stderr,"[PRAMOD-DEBUG]: meta_wayland_xdg_toplevel_post_apply_state %s %d  rcs: %ld , vcs: %ld, wait_count: %d \n",__FILE__,__LINE__,window->intel_engines.rcs_ns,window->intel_engines.vcs_ns,window->power_profiles_deamon.wait_count);
+  if(window_might_use_video(window) && window->fullscreen &&window->power_profiles_deamon.wait_count>2){
+    if(is_window_using_intel_hardware_accel(window) && !window->power_profiles_deamon.active){
+      //  fprintf(stderr,"[PRAMOD-DEBUG]: Holding meta_wayland_xdg_toplevel_post_apply_state %s %d: is active? %d, cookie: %d,app: %s, \n",__FILE__,__LINE__,window->power_profiles_deamon.active,window->power_profiles_deamon.cookie,window->res_class);
+       meta_window_hold_ppd(window);
+       window->power_profiles_deamon.wait_count=0;
+    } 
+  }
+  else {
+    if (window->power_profiles_deamon.active && window_might_use_video(window) && !(is_window_using_intel_hardware_accel(window))){
+      // fprintf(stderr,"[PRAMOD-DEBUG]: meta_wayland_xdg_toplevel_post_apply_state %s %d: Releasing PPD now \n",__FILE__,__LINE__);
+      meta_window_release_ppd(window);
+    }
+    window->power_profiles_deamon.wait_count++;
+  }
 
   old_geometry = xdg_surface_priv->geometry;
 

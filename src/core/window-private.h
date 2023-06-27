@@ -343,6 +343,19 @@ struct _MetaWindow
   /* The currently complementary tiled window, if any */
   MetaWindow *tile_match;
 
+  /* The current window has Intel video and render hardware acceleration if any*/
+  struct {
+    glong rcs_ns;
+    glong vcs_ns;
+  } intel_engines;
+
+  /* The current window might use power profiles daemon available over D-bus. */
+  struct {
+    gboolean active;
+    gint cookie;
+    gint wait_count;
+  } power_profiles_deamon;
+  
   struct {
     MetaPlacementRule *rule;
     MetaPlacementState state;
@@ -921,4 +934,9 @@ gboolean meta_window_calculate_bounds (MetaWindow *window,
                                        int        *bounds_width,
                                        int        *bounds_height);
 
+gboolean window_might_use_video (MetaWindow *window);
+gboolean is_window_using_intel_hardware_accel(MetaWindow *window);
+// gboolean window_using_intel_media_accel(void);
+void meta_window_hold_ppd(MetaWindow *window);
+void meta_window_release_ppd(MetaWindow *window);
 #endif

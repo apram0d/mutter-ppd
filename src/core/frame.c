@@ -170,7 +170,7 @@ meta_window_destroy_frame (MetaWindow *window)
     return;
 
   x11_display = window->display->x11_display;
-
+  fprintf(stderr,"[PRAMOD-DEBUG]: destroying window \n");
   meta_verbose ("Unframing window %s", window->desc);
 
   frame = window->frame;

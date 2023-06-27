@@ -322,6 +322,7 @@ meta_wayland_shell_surface_sync_actor_state (MetaWaylandActorSurface *actor_surf
 void
 meta_wayland_shell_surface_destroy_window (MetaWaylandShellSurface *shell_surface)
 {
+  fprintf(stderr,"[PRAMOD-DEBUG]: meta_wayland_shell_surface_destroy_window: destroying window ! \n");
   MetaWaylandShellSurfacePrivate *priv =
     meta_wayland_shell_surface_get_instance_private (shell_surface);
   MetaWindow *window;

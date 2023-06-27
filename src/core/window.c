@@ -968,7 +968,6 @@ _meta_window_shared_new (MetaDisplay         *display,
   MetaBackend *backend = meta_context_get_backend (context);
   MetaWorkspaceManager *workspace_manager = display->workspace_manager;
   MetaWindow *window;
-
   COGL_TRACE_BEGIN_SCOPED (MetaWindowSharedNew,
                            "Window (new)");
 
@@ -1187,7 +1186,13 @@ _meta_window_shared_new (MetaDisplay         *display,
       window->has_move_func = FALSE;
       window->has_resize_func = FALSE;
     }
+  window->intel_engines.rcs_ns = 0;
+  window->intel_engines.vcs_ns = 0;
 
+  window->power_profiles_deamon.active = False;
+  window->power_profiles_deamon.cookie = -1;
+  window->power_profiles_deamon.wait_count = 0;
+  
   window->id = meta_display_generate_window_id (display);
 
   meta_window_manage (window);
@@ -1433,7 +1438,6 @@ meta_window_unmanage (MetaWindow  *window,
 {
   MetaWorkspaceManager *workspace_manager = window->display->workspace_manager;
   GList *tmp;
-
   meta_verbose ("Unmanaging %s", window->desc);
   window->unmanaging = TRUE;
 
@@ -1441,6 +1445,9 @@ meta_window_unmanage (MetaWindow  *window,
   g_clear_handle_id (&window->close_dialog_timeout_id, g_source_remove);
 
   g_signal_emit (window, window_signals[UNMANAGING], 0);
+
+  if (window->power_profiles_deamon.active)
+    meta_window_release_ppd(window);
 
   meta_window_free_delete_dialog (window);
 
@@ -1931,6 +1938,258 @@ intervening_user_event_occurred (MetaWindow *window)
       return FALSE;
     }
 }
+void 
+meta_window_hold_ppd(MetaWindow *window){
+  GError* dbus_error = NULL;
+  GDBusConnection* connection = NULL;
+  GDBusProxy *proxy = NULL;
+  GVariant *result;
+  const gchar *method = NULL;
+  uint32_t cookie;
+  method = "HoldProfile";
+  connection = g_bus_get_sync(G_BUS_TYPE_SYSTEM,NULL,&dbus_error);
+  proxy = g_dbus_proxy_new_sync(connection,
+                G_DBUS_PROXY_FLAGS_NONE,
+                NULL,
+                "net.hadess.PowerProfiles",
+                "/net/hadess/PowerProfiles",
+                "net.hadess.PowerProfiles",
+                NULL,
+                &dbus_error
+              );
+    if (dbus_error){
+      fprintf(stderr,"[PRAMOD-DEBUG] Error: %s \n ",dbus_error->message);
+      g_error_free(dbus_error);
+    }
+    result = g_dbus_proxy_call_sync(proxy,method,
+                    g_variant_new ("(sss)", "webrtc","vpb_fullscreen",window->res_class),
+                    G_DBUS_CALL_FLAGS_NONE,
+                    -1,NULL,&dbus_error);
+
+    if (dbus_error){
+        printf("\n [PRAMOD-DEBUG] error : %s",dbus_error->message);
+        g_error_free(dbus_error);
+    }
+  g_variant_get(result, "(u)", &cookie);
+  fprintf(stderr,"[PRAMOD_DEBUG]: [%s : %d] HOLD PPD recevied cookie %d \n",__func__,__LINE__,cookie);
+  window->power_profiles_deamon.cookie = cookie;
+  window->power_profiles_deamon.active = True;
+  g_variant_unref(result);
+  g_object_unref(connection);
+  g_object_unref(proxy);
+}
+void 
+meta_window_release_ppd(MetaWindow *window){
+  GError* dbus_error = NULL;
+  GDBusConnection* connection = NULL;
+  GDBusProxy *proxy = NULL;
+  const gchar *method = NULL;
+  method = "ReleaseProfile";
+  uint32_t cookie;
+  connection = g_bus_get_sync(G_BUS_TYPE_SYSTEM,NULL,&dbus_error);
+  proxy = g_dbus_proxy_new_sync(connection,
+                G_DBUS_PROXY_FLAGS_NONE,
+                NULL,
+                "net.hadess.PowerProfiles",
+                "/net/hadess/PowerProfiles",
+                "net.hadess.PowerProfiles",
+                NULL,
+                &dbus_error
+              );
+    if (dbus_error){
+      fprintf(stderr,"[PRAMOD-DEBUG] Error: %s \n ",dbus_error->message);
+      g_error_free(dbus_error);
+    }
+    cookie = window->power_profiles_deamon.cookie;
+    
+    fprintf(stderr,"[PRAMOD_DEBUG]: [%s : %d] Release PPD recevied cookie %d \n",
+                            __func__,__LINE__,cookie);
+    g_dbus_proxy_call_sync(proxy,method,
+                  g_variant_new ("(u)",cookie),
+                  G_DBUS_CALL_FLAGS_NONE,
+                  -1,NULL,&dbus_error);
+    
+    if (dbus_error)
+    {
+        printf("\n [PRAMOD-DEBUG] error : %s",dbus_error->message);
+        g_error_free(dbus_error);
+    }
+  window->power_profiles_deamon.active = False;
+  fprintf(stderr,"[PRAMOD-DEBUG]: after release meta_wayland_xdg_release_ppd %s %d: is active? %d, cookie: %d,app: %s, \n",__FILE__,__LINE__,window->power_profiles_deamon.active,window->power_profiles_deamon.cookie,window->res_class);
+  g_object_unref(connection);
+  g_object_unref(proxy);
+}
+
+gboolean 
+window_might_use_video(MetaWindow *window){
+ if (window == NULL || window->res_class == NULL)
+    return FALSE;
+
+  if (strcmp (window->res_class, "chromium-browser") == 0)
+    return TRUE;
+
+  if (strcmp (window->res_class, "chrome-browser") == 0)
+    return TRUE;
+
+  else if (strcmp (window->res_class, "mpv") == 0)
+    return TRUE;
+
+  return FALSE;
+}
+
+gboolean 
+is_window_using_intel_hardware_accel(MetaWindow *window){
+  pid_t pid = window->client_pid;
+  gchar *file_rcs = g_strdup_printf("/proc/%d/fdinfo/14", pid);
+  gchar *file_vcs = g_strdup_printf("/proc/%d/fdinfo/15", pid);
+  glong rcs_ns = 0;
+  glong vcs_ns = 0;
+  gchar *value_rcs = NULL;
+  gchar *value_vcs = NULL;
+
+  // fprintf(stderr,"[PRAMOD-DEBUG] is_window_using_intel_hardware_accel: prev_rcs: %ld , prev_vcs: %ld \n ",window->intel_engines.rcs_ns,window->intel_engines.vcs_ns);
+  if (g_file_get_contents(file_rcs, &value_rcs, NULL, NULL)) {
+    
+    if (value_rcs != NULL) {
+      gchar **lines14 = g_strsplit(value_rcs, "\n", -1);
+      if (g_strv_length(lines14) < 7) {
+        g_strfreev(lines14);
+        return False;
+      }
+      gchar *line8 = lines14[7] != NULL ? g_strdup(lines14[7]) : NULL;
+      if (line8 != NULL) {
+        gchar **parts = g_strsplit(line8, ":", 2);
+        gchar *key = parts[0] != NULL ? g_strstrip(g_strdup(parts[0])) : NULL;
+        gchar *value = parts[1] != NULL ? g_strstrip(g_strdup(parts[1])) : NULL;
+        g_strfreev(parts);
+        // Extract the value of drm-engine-render:
+        if (key != NULL && value != NULL && g_strcmp0(key, "drm-engine-render") == 0) {
+          gchar **splitValue = g_strsplit(value, " ", -1);
+          if (splitValue[0] != NULL) {
+            rcs_ns = strtol(splitValue[0], NULL, 10);
+            // fprintf(stderr,"[PRAMOD-DEBUG] Value (drm-engine-render): %ld \n", rcs_ns);
+          }
+          g_strfreev(splitValue);
+        }
+
+        g_free(value);
+        g_free(key);
+        g_free(line8);
+      }
+
+      g_strfreev(lines14);
+    }
+
+  }else
+    fprintf(stderr,"[PRAMOD-DEBUG] **!!! FAILED TO READ FILE **!!! %s \n", file_rcs);
+
+  if (g_file_get_contents(file_vcs, &value_vcs, NULL, NULL)) {
+    if (value_vcs != NULL) {
+      gchar **lines15 = g_strsplit(value_vcs, "\n", -1);
+      if (g_strv_length(lines15) < 9) {
+        g_strfreev(lines15);
+        return False;
+      }
+      gchar *line10 = lines15[9] != NULL ? g_strdup(lines15[9]) : NULL;
+      if (line10 != NULL) {
+        // extract the value drm-engine-video
+        gchar **parts = g_strsplit(line10, ":", 2);
+        gchar *key = parts[0] != NULL ? g_strstrip(g_strdup(parts[0])) : NULL;
+        gchar *value = parts[1] != NULL ? g_strstrip(g_strdup(parts[1])) : NULL;
+        g_strfreev(parts);
+
+        if (key != NULL && value != NULL && g_strcmp0(key, "drm-engine-video") == 0) {
+          gchar **splitValue = g_strsplit(value, " ", -1);
+          if (splitValue[0] != NULL) {
+            vcs_ns = strtol(splitValue[0], NULL, 10);
+            // fprintf(stderr,"Value (drm-engine-video): %ld \n", vcs_ns);
+          }
+          g_strfreev(splitValue);
+        }
+
+        g_free(value);
+        g_free(key);
+        g_free(line10);
+      }
+
+      g_strfreev(lines15);
+    }
+
+
+  }
+
+  g_free(value_rcs);
+  g_free(value_vcs);
+  g_free(file_rcs);
+  g_free(file_vcs);
+
+  // fprintf(stderr,"Value rcs_diff:%ld vcs_diff:%ld \n",(rcs_ns - window->intel_engines.rcs_ns),(vcs_ns - window->intel_engines.vcs_ns));
+  if ((rcs_ns - window->intel_engines.rcs_ns) == 0 || (vcs_ns - window->intel_engines.vcs_ns) == 0)
+    return False;
+  
+  if ((rcs_ns - window->intel_engines.rcs_ns > 0) && (vcs_ns - window->intel_engines.vcs_ns > 0)){
+    window->intel_engines.rcs_ns = rcs_ns;
+    window->intel_engines.vcs_ns = vcs_ns;
+    return True;
+  }
+  else
+    return False;
+
+}
+// static gboolean 
+// is_intel_media_awake(const gchar* file_contents, const gchar* engine_name){
+//   gchar** lines = g_strsplit(file_contents, "\n", -1);
+//   gboolean engine_awake = FALSE;
+//   gchar* engine_prefix = g_strconcat(engine_name, "\n", NULL);
+//   gchar* awake_prefix = "Awake? ";
+
+//   for (gchar** line = lines; *line; line++) {
+//         *line = g_strstrip(*line);
+//       if (g_strcmp0(*line, engine_name)==0) {
+//               ++line;
+//           if (g_strrstr(*line, awake_prefix) != NULL) {
+//               g_strchomp(*line);
+//               // printf("Last char is %c \n",g_utf8_get_char(*line + (strlen(*line)-1)));
+//               fprintf(stderr,"[PRAMOD-DEBUG]:%s %d  line is : %s \n",__FILE__,__LINE__,line);
+//               gchar awake_value =  g_utf8_get_char(*line + (strlen(*line)-1));
+//               if (awake_value == '0') {
+//                   engine_awake = FALSE;
+//               } else if (awake_value == '1' || awake_value == '2') {
+//                   engine_awake = TRUE;
+//               }
+//           }
+//           break;
+//       }
+//   }
+//   g_strfreev(lines);
+//   g_free(engine_prefix);
+//   return engine_awake;
+// }
+
+// gboolean 
+// window_using_intel_media_accel(void, prev_rcs, prev_vcs){
+//   fprintf(stderr,"[PRAMOD-DEBUG]: window_using_intel_media_accel  %s %d \n",__FILE__,__LINE__);
+//   const gchar* filename = "/sys/kernel/debug/dri/0/i915_engine_info";
+//   gchar* file_contents = NULL;
+//   gsize length = 0;
+//   gboolean success = g_file_get_contents(filename, &file_contents, &length, NULL);
+//   if (success){
+
+//         gboolean vecs0_awake = is_intel_media_awake(file_contents, "vecs0");
+//         gboolean vcs1_awake = is_intel_media_awake(file_contents, "vcs1");
+//         gboolean vcs0_awake = is_intel_media_awake(file_contents, "vcs0");
+//         g_free(file_contents);
+
+//       fprintf(stderr,"[PRAMOD-DEBUG]:  %s %d \n",__FILE__,__LINE__);
+//       fprintf(stderr,"[PRAMOD-DEBUG]:%s %d vcs0: %d and vcs1: %d    \n",__FILE__,__LINE__,vcs0_awake,vcs1_awake);
+//       return vcs1_awake || vcs0_awake || vecs0_awake;
+//   }
+//   else {
+//     fprintf(stderr, "[PRAMOD-DEBUG]: Unable to read the file /sys/kernel/debug/dri/0/i915_engine_info \n");
+//   }
+  
+//   return FALSE;
+// }
 
 /* This function is an ugly hack.  It's experimental in nature and ought to be
  * replaced by a real hint from the app to the WM if we decide the experimental
@@ -2150,7 +2409,7 @@ meta_window_force_placement (MetaWindow *window,
 
 static void
 meta_window_show (MetaWindow *window)
-{
+{ 
   gboolean did_show;
   gboolean takes_focus_on_map;
   gboolean place_on_top_on_map;
@@ -3228,6 +3487,8 @@ meta_window_set_above (MetaWindow *window,
 void
 meta_window_make_fullscreen_internal (MetaWindow  *window)
 {
+  fprintf(stderr,"[PRAMOD-DEBUG] making full screen INTERNAL  %s:%d \n",__func__,__LINE__);
+
   if (!window->fullscreen)
     {
       meta_topic (META_DEBUG_WINDOW_OPS,
@@ -3265,8 +3526,10 @@ meta_window_make_fullscreen_internal (MetaWindow  *window)
 void
 meta_window_make_fullscreen (MetaWindow  *window)
 {
+  fprintf(stderr,"[PRAMOD-DEBUG] making full screen %s:%d \n",__func__,__LINE__);
   g_return_if_fail (META_IS_WINDOW (window));
   g_return_if_fail (!window->override_redirect);
+  fprintf(stderr,"[PRAMOD-DEBUG] client pid:%d , res_class: %s, res_name: %s",window->client_pid,window->res_class,window->res_name);
 
   if (!window->fullscreen)
     {
